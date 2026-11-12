@@ -5,7 +5,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use git2::{BranchType, Repository, StatusOptions};
+use git2::{BranchType, Repository, StatusOptions, SubmoduleIgnore, SubmoduleStatus};
 
 use crate::{
     client::ClientSettings,
@@ -343,16 +343,48 @@ impl Worktree {
         git_capture(&self.path, "log", rev, args)
     }
 
-    /// Removes this git worktree. Consumes `self` to prevent further use.
-    pub fn remove_worktree(self, _lock: &ProjectLock) -> Result<()> {
-        git_run(
-            &self.path,
-            [
-                OsStr::new("worktree"),
-                OsStr::new("remove"),
-                self.path.as_os_str(),
-            ],
-        )
+    /// Removes a clean worktree, or any worktree when `force` is set. Consumes `self` to prevent further use.
+    pub fn remove_worktree(self, _lock: &ProjectLock, force: bool) -> Result<()> {
+        if !force {
+            let mut opts = StatusOptions::new();
+            opts.include_untracked(true).recurse_untracked_dirs(true);
+            let dirty = !self.repo.statuses(Some(&mut opts))?.is_empty();
+            let submodule_changes = SubmoduleStatus::INDEX_ADDED
+                | SubmoduleStatus::INDEX_DELETED
+                | SubmoduleStatus::INDEX_MODIFIED
+                | SubmoduleStatus::WD_ADDED
+                | SubmoduleStatus::WD_DELETED
+                | SubmoduleStatus::WD_MODIFIED
+                | SubmoduleStatus::WD_INDEX_MODIFIED
+                | SubmoduleStatus::WD_WD_MODIFIED
+                | SubmoduleStatus::WD_UNTRACKED;
+            let mut dirty_submodule = false;
+            for submodule in self.repo.submodules()? {
+                if self
+                    .repo
+                    .submodule_status(submodule.name()?, SubmoduleIgnore::None)?
+                    .intersects(submodule_changes)
+                {
+                    dirty_submodule = true;
+                    break;
+                }
+            }
+            if dirty || dirty_submodule {
+                return Err(crate::error::Error::Command(
+                    "worktree is not clean".to_string(),
+                ));
+            }
+        }
+        let mut args = vec![
+            OsStr::new("worktree"),
+            OsStr::new("remove"),
+            OsStr::new("--force"),
+        ];
+        if force {
+            args.push(OsStr::new("--force"));
+        }
+        args.push(self.path.as_os_str());
+        git_run(&self.path, args)
     }
 
     /// Runs `git worktree repair` to fix broken worktree links.

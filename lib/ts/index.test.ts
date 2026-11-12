@@ -139,6 +139,11 @@ test("merge modes pass the full-range flag to the CLI", () => {
 	}
 });
 
+test("remove passes the force flag only when requested", () => {
+	assert.equal(actionArgs({ action: "remove", target: "work" }).includes("--force"), false);
+	assert.equal(actionArgs({ action: "remove", target: "work", force: true }).includes("--force"), true);
+});
+
 test("maps generic recovery actions to the integration command", () => {
 	const global = ["--json", "--no-interactive", "--color", "never"];
 	assert.deepEqual(actionArgs({ action: "integrationContinue" }), [...global, "integration", "continue"]);

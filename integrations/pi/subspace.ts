@@ -298,6 +298,7 @@ export const ACTIONS = {
 			target: Type.String({ description: "Workspace name or @sigil." }),
 			keepBranch: Type.Optional(Type.Boolean({ description: "Keep the git branch." })),
 			recursive: Type.Optional(Type.Boolean({ description: "Remove the workspace and its descendants." })),
+			force: Type.Optional(Type.Boolean({ description: "Remove the worktree even when it is dirty or locked." })),
 		},
 	},
 	rename: {

@@ -323,8 +323,14 @@ export const ACTIONS = {
 	remove: write(
 		"managedWrites",
 		["remove"],
-		(p) => ["remove", ...pos(p.target), ...flag("--keep-branch", p.keepBranch), ...flag("--recursive", p.recursive)],
-		["target", "keepBranch", "recursive"],
+		(p) => [
+			"remove",
+			...pos(p.target),
+			...flag("--keep-branch", p.keepBranch),
+			...flag("--recursive", p.recursive),
+			...flag("--force", p.force),
+		],
+		["target", "keepBranch", "recursive", "force"],
 		["target"],
 		"object",
 		["project", "removed", "reparented"],

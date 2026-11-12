@@ -257,6 +257,9 @@ enum Cmd {
         /// Remove workspace and all descendants.
         #[arg(short, long)]
         recursive: bool,
+        /// Remove the worktree even when it is dirty or locked.
+        #[arg(long)]
+        force: bool,
     },
     /// Rename a workspace.
     Rename {
@@ -793,6 +796,7 @@ fn mutation_effects(state: &GlobalState, cli: &Cli, action: &str) -> Result<serd
             target,
             keep_branch,
             recursive,
+            force,
         } => {
             let ws = resolve_workspace(state, cli, target)?;
             let project = ws.project();
@@ -804,7 +808,7 @@ fn mutation_effects(state: &GlobalState, cli: &Cli, action: &str) -> Result<serd
             let meta = project.metadata().read()?;
             let plan = plan_reparents(&targets, &meta)?;
             Ok(
-                serde_json::json!({"kind":"workspace", "operation":"remove", "project":project.name(), "targets":targets.iter().map(|ws| serde_json::json!({"name":ws.name(),"path":ws.path(),"branch":ws.worktree().ok().and_then(|wt| wt.get_branch())})).collect::<Vec<_>>(), "delete_branch":!*keep_branch, "reparented":plan.reparented().map(|(child,parent)| serde_json::json!({"workspace":child,"parent":parent})).collect::<Vec<_>>() }),
+                serde_json::json!({"kind":"workspace", "operation":"remove", "project":project.name(), "targets":targets.iter().map(|ws| serde_json::json!({"name":ws.name(),"path":ws.path(),"branch":ws.worktree().ok().and_then(|wt| wt.get_branch())})).collect::<Vec<_>>(), "delete_branch":!*keep_branch, "force":force, "reparented":plan.reparented().map(|(child,parent)| serde_json::json!({"workspace":child,"parent":parent})).collect::<Vec<_>>() }),
             )
         }
         Cmd::Rename { target, new_name } => {
@@ -1144,7 +1148,7 @@ fn machine_action_fields(name: &str) -> &'static [&'static str] {
             "name", "ref", "branch", "detach", "unstaged", "parent", "parentOf",
         ],
         "branch" => &["name", "ref", "branch", "detach", "unstaged"],
-        "remove" => &["target", "keepBranch", "recursive"],
+        "remove" => &["target", "keepBranch", "recursive", "force"],
         "rename" => &["target", "newName"],
         "repair" => &["dryRun"],
         "mergePreview" | "merge" => &[
@@ -1365,6 +1369,7 @@ fn run(cli: &Cli, out: &mut output::Stdio) -> Result<()> {
             target,
             keep_branch,
             recursive,
+            force,
         } => cmd_remove(
             &state,
             cli,
@@ -1374,6 +1379,7 @@ fn run(cli: &Cli, out: &mut output::Stdio) -> Result<()> {
             target,
             *keep_branch,
             *recursive,
+            *force,
         ),
         Cmd::Rename { target, new_name } => cmd_rename(&state, cli, &hooks, out, target, new_name),
         Cmd::Repair { project, dry_run } => {
@@ -3379,6 +3385,7 @@ fn remove_confirmed_workspaces(
     project: &Project,
     targets: &[Workspace],
     delete_branch: bool,
+    force: bool,
 ) -> Result<ConfirmedRemovals> {
     let mut removed = Vec::new();
     let mut reparented = Vec::new();
@@ -3393,7 +3400,7 @@ fn remove_confirmed_workspaces(
             }
         };
         let branch = wt.get_branch();
-        if let Err(error) = wt.remove_worktree(lock) {
+        if let Err(error) = wt.remove_worktree(lock, force) {
             failures.push(format!("{}: {error:#}", ws.full_name()));
             continue;
         }
@@ -3458,6 +3465,7 @@ fn cmd_remove<R: io::Write, D: io::Write, M: io::Write>(
     target: &str,
     keep_branch: bool,
     recursive: bool,
+    force: bool,
 ) -> Result<()> {
     let target_ws = resolve_workspace(state, cli, target)?;
     let project = target_ws.project();
@@ -3543,7 +3551,7 @@ fn cmd_remove<R: io::Write, D: io::Write, M: io::Write>(
         reparented,
         pending,
         mut failures,
-    } = remove_confirmed_workspaces(&lock, project, &targets, delete_branch)?;
+    } = remove_confirmed_workspaces(&lock, project, &targets, delete_branch, force)?;
 
     drop(lock);
 
@@ -4128,7 +4136,7 @@ fn remove_merged_source<R: io::Write, D: io::Write, M: io::Write>(
     let wt = source_ws.worktree()?;
     let branch = wt.get_branch();
     let path = source_ws.path().display().to_string();
-    wt.remove_worktree(lock)?;
+    wt.remove_worktree(lock, false)?;
     project.metadata().update(lock, |meta| {
         if meta.default.as_deref() == Some(source_ws.name()) {
             return Err(Error::IsDefaultWorkspace);
@@ -5370,7 +5378,14 @@ mod tests {
             vec!["subspace", "add", "work", "--parent-of", "child"],
             vec!["subspace", "branch", "work"],
             vec!["subspace", "remove", "work"],
-            vec!["subspace", "remove", "work", "--keep-branch", "--recursive"],
+            vec![
+                "subspace",
+                "remove",
+                "work",
+                "--keep-branch",
+                "--recursive",
+                "--force",
+            ],
             vec!["subspace", "rename", "work", "next"],
             vec!["subspace", "repair"],
             vec!["subspace", "repair", "--dry-run"],
@@ -8200,6 +8215,134 @@ mod tests {
         assert!(repair_relink_fields(&fixture.project, &[]).is_empty());
     }
 
+    fn removal_fixture_with_submodule() -> RemovalFixture {
+        let fixture = removal_fixture();
+        let source = fixture._dir.path().join("submodule-source");
+        std::fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        git(&source, &["commit", "-q", "--allow-empty", "-m", "initial"]);
+        git(
+            &fixture.child.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                source.to_str().unwrap(),
+                "deps/example",
+            ],
+        );
+        git(
+            &fixture.child.path(),
+            &["commit", "-q", "-am", "add submodule"],
+        );
+        fixture
+    }
+
+    #[test]
+    fn remove_accepts_a_clean_workspace_with_submodules() {
+        let fixture = removal_fixture_with_submodule();
+        let lock = fixture.project.lock("test").unwrap();
+        let removals = remove_confirmed_workspaces(
+            &lock,
+            &fixture.project,
+            std::slice::from_ref(&fixture.child),
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(removals.failures.is_empty(), "{:?}", removals.failures);
+        assert!(!fixture.child.path().exists());
+        assert!(
+            !fixture
+                .project
+                .metadata()
+                .read()
+                .unwrap()
+                .workspaces
+                .contains_key("child")
+        );
+    }
+
+    #[test]
+    fn remove_keeps_a_dirty_submodule() {
+        let fixture = removal_fixture_with_submodule();
+        git(
+            &fixture.child.path(),
+            &["config", "submodule.deps/example.ignore", "all"],
+        );
+        let changed = fixture.child.path().join("deps/example/untracked.txt");
+        std::fs::write(&changed, "keep").unwrap();
+        let lock = fixture.project.lock("test").unwrap();
+        let removals = remove_confirmed_workspaces(
+            &lock,
+            &fixture.project,
+            std::slice::from_ref(&fixture.child),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(removals.failures.len(), 1);
+        assert!(changed.exists());
+        assert!(
+            fixture
+                .project
+                .metadata()
+                .read()
+                .unwrap()
+                .workspaces
+                .contains_key("child")
+        );
+    }
+
+    #[test]
+    fn force_remove_discards_a_dirty_submodule() {
+        let fixture = removal_fixture_with_submodule();
+        std::fs::write(
+            fixture.child.path().join("deps/example/untracked.txt"),
+            "discard",
+        )
+        .unwrap();
+        let lock = fixture.project.lock("test").unwrap();
+        let removals = remove_confirmed_workspaces(
+            &lock,
+            &fixture.project,
+            std::slice::from_ref(&fixture.child),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(removals.failures.is_empty(), "{:?}", removals.failures);
+        assert!(!fixture.child.path().exists());
+    }
+
+    #[test]
+    fn force_remove_discards_a_dirty_workspace() {
+        let fixture = removal_fixture();
+        std::fs::write(fixture.child.path().join("untracked.txt"), "discard").unwrap();
+        let lock = fixture.project.lock("test").unwrap();
+        let removals = remove_confirmed_workspaces(
+            &lock,
+            &fixture.project,
+            std::slice::from_ref(&fixture.child),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(removals.failures.is_empty(), "{:?}", removals.failures);
+        assert!(!fixture.child.path().exists());
+        assert!(
+            !fixture
+                .project
+                .metadata()
+                .read()
+                .unwrap()
+                .workspaces
+                .contains_key("child")
+        );
+    }
+
     #[test]
     fn remove_keeps_a_dirty_workspace() {
         let fixture = removal_fixture();
@@ -8210,6 +8353,7 @@ mod tests {
             &fixture.project,
             std::slice::from_ref(&fixture.child),
             true,
+            false,
         )
         .unwrap();
         assert_eq!(removals.failures.len(), 1);
@@ -8238,6 +8382,7 @@ mod tests {
             &fixture.project,
             std::slice::from_ref(&fixture.child),
             true,
+            false,
         )
         .unwrap();
         assert!(removals.failures.is_empty());
@@ -8269,6 +8414,7 @@ mod tests {
             &fixture.project,
             std::slice::from_ref(&fixture.child),
             false,
+            false,
         )
         .unwrap();
         drop(lock);
@@ -8278,6 +8424,26 @@ mod tests {
         assert!(metadata.workspaces.contains_key("child"));
         assert!(fixture.child.path().exists());
         assert!(fixture.child.state_path().join("data.json").exists());
+    }
+
+    #[test]
+    fn force_remove_accepts_a_locked_workspace() {
+        let fixture = removal_fixture();
+        git(
+            &fixture.root,
+            &["worktree", "lock", fixture.child.path().to_str().unwrap()],
+        );
+        let lock = fixture.project.lock("test").unwrap();
+        let removals = remove_confirmed_workspaces(
+            &lock,
+            &fixture.project,
+            std::slice::from_ref(&fixture.child),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(removals.failures.is_empty(), "{:?}", removals.failures);
+        assert!(!fixture.child.path().exists());
     }
 
     #[test]
@@ -8309,6 +8475,7 @@ mod tests {
             &lock,
             &fixture.project,
             &[fixture.child.clone(), fixture.parent.clone()],
+            false,
             false,
         )
         .unwrap();
