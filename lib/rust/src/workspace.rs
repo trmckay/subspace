@@ -343,10 +343,11 @@ impl Workspace {
     /// dropped commits of the parent as duplicates. When the parent rewrote nothing, `all` onto it
     /// does what the default does, so the block costs nothing.
     ///
-    /// When the base tip is already an ancestor of HEAD, there is nothing to replay, and the plan
-    /// skips the replay. Under `interactive` it still replays the commits of the workspace, so `git
-    /// rebase -i` can edit them. See [`Workspace::replay_branch_point`] for how it picks the branch
-    /// point in every other case.
+    /// When the base tip leads HEAD and includes the stored fork point, the plan skips the replay.
+    /// It also skips when the stored fork point is stale.
+    /// A base below a valid fork point needs a replay to exclude inherited commits.
+    /// Under `interactive` it still replays the commits of the workspace, so `git rebase -i` can
+    /// edit them. See [`Workspace::replay_branch_point`] for how it picks the branch point.
     pub fn plan_rebase(
         &self,
         worktree: &Worktree,
@@ -363,7 +364,16 @@ impl Workspace {
             self.require_chain_current(onto_ws, meta)?;
         }
         if !mode.interactive && worktree.is_ancestor(onto_head, head)? {
-            return Ok(RebasePlan::SkipReplay);
+            let inherited = match self.parent_edge(meta) {
+                Some(edge) if !mode.all => {
+                    !worktree.is_ancestor(&edge.base, head)?
+                        || worktree.is_ancestor(&edge.base, onto_head)?
+                }
+                _ => true,
+            };
+            if inherited {
+                return Ok(RebasePlan::SkipReplay);
+            }
         }
         let branch_point = self.replay_branch_point(worktree, meta, head, mode.all)?;
         Ok(RebasePlan::Replay { branch_point })
@@ -2536,6 +2546,47 @@ mod tests {
             .unwrap();
 
         assert_eq!(plan, RebasePlan::SkipReplay);
+    }
+
+    #[test]
+    fn plan_rebase_replays_own_commits_onto_an_ancestor_below_the_fork() {
+        let (_dir, parent_ws, child_ws, fork) = parent_child();
+        let meta = meta_with_edge(fork);
+        let root_path = parent_ws.project().worktrees_path().join("root");
+        git(
+            &parent_ws.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "root",
+                root_path.to_str().unwrap(),
+                "HEAD^",
+            ],
+        );
+        let root_ws = Workspace::new(parent_ws.project().clone(), "root".to_string());
+        let child_wt = child_ws.worktree().unwrap();
+        let head = child_wt.head().unwrap();
+        let root_head = root_ws.worktree().unwrap().head().unwrap();
+
+        let plan = child_ws
+            .plan_rebase(
+                &child_wt,
+                &meta,
+                &root_ws,
+                &root_head,
+                &head,
+                RebaseMode::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan,
+            RebasePlan::Replay {
+                branch_point: Some(fork)
+            }
+        );
     }
 
     #[test]

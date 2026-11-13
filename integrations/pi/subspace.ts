@@ -163,6 +163,7 @@ function resultSummary(action: ActionName | undefined, value: unknown): string {
 		case "projectInit":
 		case "add":
 		case "branch":
+		case "clone":
 		case "snapshotRestore":
 			return `${stringField(data, "workspace") ?? "Workspace"} created`;
 		case "projectRemove":
@@ -291,6 +292,9 @@ export const ACTIONS = {
 		},
 	},
 	branch: {
+		fields: NEW_WORKSPACE_FIELDS,
+	},
+	clone: {
 		fields: NEW_WORKSPACE_FIELDS,
 	},
 	remove: {

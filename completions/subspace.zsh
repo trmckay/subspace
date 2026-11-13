@@ -124,6 +124,7 @@ function _subspace() {
                 'capabilities:report the machine protocol'
                 'add:add a workspace from a ref or another workspace'
                 'branch:add a workspace nested under the current one'
+                'clone:copy current workspace tip and parent fork point'
                 'current:print the workspace containing CWD'
                 'default:print or set the project default workspace'
                 'branch-prefix:print or set the project branch prefix'
@@ -158,7 +159,7 @@ function _subspace() {
                         '--branch[new branch name]:branch:' \
                         '--detach[check out a detached HEAD]' \
                         '--unstaged[carry unstaged changes and untracked files from parent workspace]' ;;
-                branch)
+                branch | clone)
                     _arguments \
                         '1:name:' \
                         '2:ref:_subspace_refs' \

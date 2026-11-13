@@ -247,6 +247,12 @@ enum Cmd {
         #[serde(flatten)]
         args: AddArgs,
     },
+    /// Copy the current workspace tip and its parent fork point into a new workspace.
+    Clone {
+        #[command(flatten)]
+        #[serde(flatten)]
+        args: AddArgs,
+    },
     /// Remove a workspace worktree.
     Remove {
         /// Workspace name, project/workspace, or @sigil.
@@ -639,6 +645,7 @@ fn json_supported(cmd: &Cmd) -> bool {
             | Cmd::Project { .. }
             | Cmd::Add { .. }
             | Cmd::Branch { .. }
+            | Cmd::Clone { .. }
             | Cmd::Remove { .. }
             | Cmd::Rename { .. }
             | Cmd::Repair { .. }
@@ -680,7 +687,7 @@ fn mutation_action(cmd: &Cmd) -> Option<&'static str> {
             ProjectAction::Init { .. } => Some("project-init"),
             _ => None,
         },
-        Cmd::Add { .. } | Cmd::Branch { .. } => Some("add"),
+        Cmd::Add { .. } | Cmd::Branch { .. } | Cmd::Clone { .. } => Some("add"),
         Cmd::Remove { .. } => Some("remove"),
         Cmd::Rename { .. } => Some("rename"),
         Cmd::Repair { dry_run: false, .. } => Some("repair"),
@@ -765,14 +772,19 @@ fn mutation_effects(state: &GlobalState, cli: &Cli, action: &str) -> Result<serd
             };
             Ok(serde_json::json!({"kind":"project", "project":effect}))
         }
-        Cmd::Add { args, .. } | Cmd::Branch { args } => {
+        Cmd::Add { args, .. } | Cmd::Branch { args } | Cmd::Clone { args } => {
             let ctx = resolve_context(state, cli)?;
             let project = ctx.scope.project();
             let (parent, parent_of) = match &cli.command {
                 Cmd::Add {
                     parent, parent_of, ..
-                } => (parent.as_deref(), parent_of.as_deref()),
-                _ => (Some("@current"), None),
+                } => (parent.clone(), parent_of.as_deref()),
+                Cmd::Clone { .. } => {
+                    let origin = ctx.scope.require_workspace()?;
+                    let meta = project.metadata().read()?;
+                    (origin.parent_name(&meta), None)
+                }
+                _ => (Some("@current".to_string()), None),
             };
             let meta = project.metadata().read()?;
             let parent_name = if let Some(child) = parent_of {
@@ -781,6 +793,7 @@ fn mutation_effects(state: &GlobalState, cli: &Cli, action: &str) -> Result<serd
                     .map(|ws| ws.name().to_string())
             } else {
                 parent
+                    .as_deref()
                     .map(|p| ctx.resolve_target(state, p, TargetScope::SameProject))
                     .transpose()?
                     .map(|ws| ws.name().to_string())
@@ -789,7 +802,7 @@ fn mutation_effects(state: &GlobalState, cli: &Cli, action: &str) -> Result<serd
                 .map(|s| ctx.resolve_target(state, s, TargetScope::SameProject))
                 .transpose()?;
             Ok(
-                serde_json::json!({"kind":"workspace", "operation":"add", "project":project.name(), "name":args.name, "path":Workspace::new(project.clone(), args.name.clone()).path(), "parent":parent_name, "parent_of":child.map(|ws| ws.name().to_string()), "ref":args.git_ref, "branch":args.branch, "detach":args.detach, "unstaged":args.unstaged}),
+                serde_json::json!({"kind":"workspace", "operation":if matches!(cli.command, Cmd::Clone { .. }) { "clone" } else { "add" }, "project":project.name(), "name":args.name, "path":Workspace::new(project.clone(), args.name.clone()).path(), "parent":parent_name, "parent_of":child.map(|ws| ws.name().to_string()), "ref":args.git_ref, "branch":args.branch, "detach":args.detach, "unstaged":args.unstaged}),
             )
         }
         Cmd::Remove {
@@ -1147,7 +1160,7 @@ fn machine_action_fields(name: &str) -> &'static [&'static str] {
         "add" => &[
             "name", "ref", "branch", "detach", "unstaged", "parent", "parentOf",
         ],
-        "branch" => &["name", "ref", "branch", "detach", "unstaged"],
+        "branch" | "clone" => &["name", "ref", "branch", "detach", "unstaged"],
         "remove" => &["target", "keepBranch", "recursive", "force"],
         "rename" => &["target", "newName"],
         "repair" => &["dryRun"],
@@ -1175,7 +1188,7 @@ fn machine_action_required(name: &str) -> &'static [&'static str] {
         "projectMove" => &["name", "dir"],
         "projectClone" => &["remote"],
         "projectInit" => &["path"],
-        "add" | "branch" => &["name"],
+        "add" | "branch" | "clone" => &["name"],
         "remove" => &["target"],
         "rename" => &["target", "newName"],
         "mergePreview" | "merge" => &["mergeSource"],
@@ -1193,7 +1206,7 @@ fn machine_action_constraints(name: &str) -> &'static [&'static str] {
             "parentOf-excludes-ref",
             "branch-excludes-detach",
         ],
-        "branch" => &["branch-excludes-detach"],
+        "branch" | "clone" => &["branch-excludes-detach"],
         "merge" | "mergePreview" => &["deleteBranch-requires-remove"],
         _ => &[],
     }
@@ -1239,6 +1252,7 @@ fn machine_capabilities() -> serde_json::Value {
         "projectInit",
         "add",
         "branch",
+        "clone",
         "remove",
         "rename",
     ];
@@ -1361,10 +1375,23 @@ fn run(cli: &Cli, out: &mut output::Stdio) -> Result<()> {
             &hooks,
             out,
             args,
-            parent.as_deref(),
-            parent_of.as_deref(),
+            AddMode::Add {
+                parent: parent.as_deref(),
+                parent_of: parent_of.as_deref(),
+            },
         ),
-        Cmd::Branch { args } => cmd_add(&state, cli, &hooks, out, args, Some("@current"), None),
+        Cmd::Branch { args } => cmd_add(
+            &state,
+            cli,
+            &hooks,
+            out,
+            args,
+            AddMode::Add {
+                parent: Some("@current"),
+                parent_of: None,
+            },
+        ),
+        Cmd::Clone { args } => cmd_add(&state, cli, &hooks, out, args, AddMode::Clone),
         Cmd::Remove {
             target,
             keep_branch,
@@ -3125,15 +3152,28 @@ fn workspace_fields(workspace: &Workspace) -> Fields {
     .env(env)
 }
 
+/// Selects an add from a ref or a clone of the current workspace and its fork point.
+enum AddMode<'a> {
+    Add {
+        parent: Option<&'a str>,
+        parent_of: Option<&'a str>,
+    },
+    Clone,
+}
+
 fn cmd_add(
     state: &GlobalState,
     cli: &Cli,
     hooks: &HookRunner,
     out: &mut output::Stdio,
     args: &AddArgs,
-    parent: Option<&str>,
-    parent_of: Option<&str>,
+    mode: AddMode<'_>,
 ) -> Result<()> {
+    let clone_source = matches!(mode, AddMode::Clone);
+    let (parent, parent_of) = match mode {
+        AddMode::Add { parent, parent_of } => (parent, parent_of),
+        AddMode::Clone => (None, None),
+    };
     let AddArgs {
         name,
         git_ref,
@@ -3158,6 +3198,16 @@ fn cmd_add(
     // For `--parent-of`, put the new workspace between the child and its former parent. The new
     // workspace takes that former parent, and the child anchors onto the new workspace later. See
     // `plan_insert_parent`, which runs once the new workspace exists.
+    let source = if clone_source {
+        Some(ctx.scope.require_workspace()?)
+    } else {
+        None
+    };
+    let source_edge = if let Some(source) = &source {
+        source.parent_edge(&project.metadata().read()?)
+    } else {
+        None
+    };
     let (parent_ws, reparent_child, former_parent_edge) = match parent_of {
         Some(child) => {
             let child = ctx.resolve_target(state, child, TargetScope::SameProject)?;
@@ -3167,7 +3217,11 @@ fn cmd_add(
             (former_parent, Some(child), former_parent_edge)
         }
         None => {
-            let parent_ws = match parent {
+            let parent_ws = match source_edge
+                .as_ref()
+                .map(|edge| edge.name.as_str())
+                .or(parent)
+            {
                 Some(p) => Some(ctx.resolve_target(state, p, TargetScope::SameProject)?),
                 None => None,
             };
@@ -3175,7 +3229,7 @@ fn cmd_add(
         }
     };
 
-    if unstaged && parent_ws.is_none() {
+    if unstaged && parent_ws.is_none() && source.is_none() {
         bail!("--unstaged requires a parent workspace to copy working-tree state from");
     }
 
@@ -3184,9 +3238,17 @@ fn cmd_add(
         .filter(|_| reparent_child.is_some() && git_ref.is_none())
     {
         StartPoint::Commit(former_parent.worktree()?.resolve_ref("HEAD")?)
+    } else if let Some(source) = source.as_ref().filter(|_| git_ref.is_none()) {
+        StartPoint::Commit(source.worktree()?.resolve_ref("HEAD")?)
     } else {
         resolve_start(&ctx, state, project, git_ref.as_deref())?
     };
+
+    if let Some(edge) = &source_edge
+        && !project.anchor_worktree()?.is_ancestor(&edge.base, &start)?
+    {
+        bail!("clone start point is before the source fork point");
+    }
 
     // Both phases run the same fields, so they are built here, from the tree as it stands before
     // the change: the planned path of the new workspace, and the parent each edge moves from.
@@ -3211,6 +3273,11 @@ fn cmd_add(
     // `former_parent_edge` and `parent_ws` were read before the lock, and `plan_insert_parent`
     // below feeds `former_parent_edge` into the new metadata. Re-read here and bail if the child's
     // edge moved, or its former parent is gone, since the plan captured above is now stale.
+    if let Some(source) = &source
+        && source.parent_edge(&project.metadata().read()?) != source_edge
+    {
+        bail!("source workspace changed since the clone was planned\nrun it again");
+    }
     if let Some(child) = &reparent_child {
         let meta = project.metadata().read()?;
         let parent_gone = parent_ws
@@ -3228,6 +3295,7 @@ fn cmd_add(
         None
     } else {
         match &parent_ws {
+            Some(_) if source.is_some() => source_edge.clone(),
             Some(parent_ws) => match parent_ws.edge_for_child(&start) {
                 Ok(edge) => Some(edge),
                 Err(Error::NoCommonAncestor { .. }) => bail!(
@@ -3296,10 +3364,10 @@ fn cmd_add(
     }
 
     if unstaged {
-        let parent_ws = parent_ws
-            .as_ref()
-            .expect("checked --unstaged requires parent");
-        parent_ws
+        let from_ws = source
+            .or(parent_ws.as_ref())
+            .expect("checked --unstaged source");
+        from_ws
             .worktree()?
             .merge_working_tree(&lock, &new_ws.worktree()?)?;
     }
@@ -4622,7 +4690,17 @@ fn cmd_snapshot_restore(
         detach: false,
         unstaged: false,
     };
-    cmd_add(state, cli, hooks, out, &args, None, None)
+    cmd_add(
+        state,
+        cli,
+        hooks,
+        out,
+        &args,
+        AddMode::Add {
+            parent: None,
+            parent_of: None,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -7762,6 +7840,7 @@ mod tests {
         &["subspace", "project", "init", "/p/tide"],
         &["subspace", "add", "work"],
         &["subspace", "branch", "work"],
+        &["subspace", "clone", "work"],
         &["subspace", "remove", "work"],
         &["subspace", "rename", "work", "next"],
         &["subspace", "repair"],
@@ -7809,6 +7888,7 @@ mod tests {
             Cmd::Log { .. } => "log".to_string(),
             Cmd::Add { .. } => "add".to_string(),
             Cmd::Branch { .. } => "branch".to_string(),
+            Cmd::Clone { .. } => "clone".to_string(),
             Cmd::Remove { .. } => "remove".to_string(),
             Cmd::Rename { .. } => "rename".to_string(),
             Cmd::Repair { .. } => "repair".to_string(),
