@@ -293,6 +293,7 @@ function _subspace() {
                     _arguments \
                         '1:target:_subspace_absolute_names' \
                         '--keep-branch[keep the git branch after the worktree goes]' \
+                        '--force[remove a dirty or locked worktree]' \
                         '(-r --recursive)'{-r,--recursive}'[remove workspace and all descendants]' ;;
                 rename)
                     _arguments \
