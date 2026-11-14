@@ -185,8 +185,10 @@ function resultSummary(action: ActionName | undefined, value: unknown): string {
 			return `${stringField(data, "workspace") ?? "Workspace"}: ${stringField(data, "outcome") ?? "rebased"}`;
 		case "rebasePreview":
 			return integrationPreviewSummary("rebase", data);
-		case "integrationContinue":
-		case "integrationAbort":
+		case "mergeContinue":
+		case "mergeAbort":
+		case "rebaseContinue":
+		case "rebaseAbort":
 			return `${stringField(data, "workspace") ?? "Workspace"}: ${stringField(data, "outcome") ?? "rebased"}`;
 		case "snapshotCreate":
 			return `${stringField(data, "workspace") ?? "Workspace"}: ${String(data["bytes"])} bytes archived`;
@@ -346,12 +348,10 @@ export const ACTIONS = {
 			all: ALL,
 		},
 	},
-	integrationContinue: {
-		fields: {},
-	},
-	integrationAbort: {
-		fields: {},
-	},
+	mergeContinue: { fields: {} },
+	mergeAbort: { fields: {} },
+	rebaseContinue: { fields: {} },
+	rebaseAbort: { fields: {} },
 	snapshotCreate: {
 		fields: { archiveRef: Type.Optional(Type.String({ description: "Git ref or @sigil to archive." })) },
 	},
@@ -524,8 +524,10 @@ export default function (pi: ExtensionAPI, dependencies: Dependencies = {}): voi
 			const options: RunOptions = {
 				exec: (command, args, runOptions) =>
 					pi.exec(
-						call.action === "integrationContinue" ? "env" : command,
-						call.action === "integrationContinue" ? ["GIT_EDITOR=true", command, ...args] : args,
+						call.action === "mergeContinue" || call.action === "rebaseContinue" ? "env" : command,
+						call.action === "mergeContinue" || call.action === "rebaseContinue"
+							? ["GIT_EDITOR=true", command, ...args]
+							: args,
 						{ ...runOptions, cwd: ctx.cwd, signal },
 					),
 				cwd: ctx.cwd,

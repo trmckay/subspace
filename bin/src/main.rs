@@ -286,39 +286,48 @@ enum Cmd {
     /// Merge a workspace into the current one.
     Merge {
         /// Source workspace name or @sigil.
-        source: String,
+        #[arg(required_unless_present = "recovery", conflicts_with = "recovery")]
+        source: Option<String>,
         /// Squash the selected commits with this commit message.
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, conflicts_with = "recovery")]
         squash: Option<String>,
         /// Replay every source commit since the common ancestor with the destination.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "recovery")]
         all: bool,
         /// Also bring unstaged changes and untracked files.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "recovery")]
         unstaged: bool,
         /// Remove the source workspace after a successful merge.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "recovery")]
         remove: bool,
         /// Delete the source branch when removing the source workspace.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "recovery")]
         delete_branch: bool,
+        /// Continue a stopped merge.
+        #[arg(long = "continue", group = "recovery")]
+        resume: bool,
+        /// Abort a stopped merge.
+        #[arg(long, group = "recovery")]
+        abort: bool,
     },
     /// Rebase workspace onto a base workspace.
     Rebase {
         /// Base workspace name or @sigil (default: @parent).
+        #[arg(conflicts_with = "recovery")]
         base: Option<String>,
         /// Rebase interactively (git rebase -i).
-        #[arg(id = "rebase_interactive", short = 'i')]
+        #[arg(id = "rebase_interactive", short = 'i', conflicts_with = "recovery")]
         interactive: bool,
         /// Replay every commit ahead of the base, not only those ahead of the branch point. It
         /// keeps the commits that the base rewrote below the branch point.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "recovery")]
         all: bool,
-    },
-    /// Continue or abort a stopped merge or rebase.
-    Integration {
-        #[command(subcommand)]
-        action: IntegrationAction,
+        /// Continue a stopped rebase.
+        #[arg(long = "continue", group = "recovery")]
+        resume: bool,
+        /// Abort a stopped rebase.
+        #[arg(long, group = "recovery")]
+        abort: bool,
     },
     /// Archive a workspace's commit, list snapshots, or restore one.
     Snapshot {
@@ -333,14 +342,6 @@ enum InspectTarget {
     Workspace,
     /// Inspect the current project.
     Project,
-}
-
-#[derive(Subcommand, Serialize)]
-enum IntegrationAction {
-    /// Continue a stopped merge or rebase.
-    Continue,
-    /// Abort a stopped merge or rebase.
-    Abort,
 }
 
 #[derive(Args, Serialize)]
@@ -654,7 +655,6 @@ fn json_supported(cmd: &Cmd) -> bool {
                 interactive: false,
                 ..
             }
-            | Cmd::Integration { .. }
             | Cmd::Snapshot { .. }
     )
 }
@@ -693,7 +693,6 @@ fn mutation_action(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Repair { dry_run: false, .. } => Some("repair"),
         Cmd::Merge { .. } => Some("merge"),
         Cmd::Rebase { .. } => Some("rebase"),
-        Cmd::Integration { .. } => Some("integration"),
         Cmd::Snapshot { action } => match action {
             None | Some(SnapshotAction::Create { .. }) => Some("snapshot-create"),
             Some(SnapshotAction::Restore { .. }) => Some("snapshot-restore"),
@@ -852,7 +851,7 @@ fn mutation_effects(state: &GlobalState, cli: &Cli, action: &str) -> Result<serd
             snapshot_effects(state, cli, &project, action.as_ref())
         }
         Cmd::Merge { .. } | Cmd::Rebase { .. } => {
-            unreachable!("integration previews use integration_preview")
+            unreachable!("merge and rebase previews use integration_preview")
         }
         _ => Ok(serde_json::json!({"kind":action,"command":command})),
     }
@@ -1001,6 +1000,9 @@ fn integration_preview(state: &GlobalState, cli: &Cli) -> Result<machine::Integr
     let summary;
     match &cli.command {
         Cmd::Merge { source, all, .. } => {
+            let source = source
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("merge source required"))?;
             let source_ws = ctx.resolve_target(state, source, TargetScope::SameProject)?;
             let base = wt.head()?;
             let source_wt = source_ws.worktree()?;
@@ -1058,6 +1060,7 @@ fn integration_preview(state: &GlobalState, cli: &Cli) -> Result<machine::Integr
             base,
             interactive,
             all,
+            ..
         } => {
             let former = ws.parent_workspace(&meta);
             let onto = match base {
@@ -1117,9 +1120,10 @@ fn integration_preview(state: &GlobalState, cli: &Cli) -> Result<machine::Integr
                     remove,
                     delete_branch,
                     all,
+                    ..
                 } => serde_json::json!({
-                    "kind":"integration", "operation":"merge", "all":all, "source":ctx.resolve_target(state, source, TargetScope::SameProject)?.name(), "destination":ws.name(),
-                    "source_path":ctx.resolve_target(state, source, TargetScope::SameProject)?.path(), "destination_path":ws.path(),
+                    "kind":"integration", "operation":"merge", "all":all, "source":ctx.resolve_target(state, source.as_deref().ok_or_else(|| anyhow::anyhow!("merge source required"))?, TargetScope::SameProject)?.name(), "destination":ws.name(),
+                    "source_path":ctx.resolve_target(state, source.as_deref().ok_or_else(|| anyhow::anyhow!("merge source required"))?, TargetScope::SameProject)?.path(), "destination_path":ws.path(),
                     "squash":squash.is_some(), "unstaged":unstaged, "remove":remove, "delete_branch":delete_branch,
                     "applied_commits":applied.clone(), "dropped_commits":dropped.clone(), "changed_paths":changed.clone(), "overlap_paths":overlap.clone(),
                     "requested_unstaged_paths":requested.clone(), "untracked_collisions":collisions.clone()
@@ -1261,8 +1265,10 @@ fn machine_capabilities() -> serde_json::Value {
         "merge",
         "rebasePreview",
         "rebase",
-        "integrationContinue",
-        "integrationAbort",
+        "mergeContinue",
+        "mergeAbort",
+        "rebaseContinue",
+        "rebaseAbort",
         "snapshotCreate",
         "snapshotRestore",
     ];
@@ -1325,6 +1331,15 @@ fn run(cli: &Cli, out: &mut output::Stdio) -> Result<()> {
     if let Some(action) = mutation_action(&cli.command)
         && cli.preview
     {
+        if matches!(
+            cli.command,
+            Cmd::Merge { resume: true, .. }
+                | Cmd::Merge { abort: true, .. }
+                | Cmd::Rebase { resume: true, .. }
+                | Cmd::Rebase { abort: true, .. }
+        ) {
+            bail!("recovery commands do not support --preview");
+        }
         if matches!(cli.command, Cmd::Merge { .. } | Cmd::Rebase { .. }) {
             out.success(&integration_preview(&state, cli)?)?;
             return Ok(());
@@ -1412,6 +1427,9 @@ fn run(cli: &Cli, out: &mut output::Stdio) -> Result<()> {
         Cmd::Repair { project, dry_run } => {
             cmd_repair(&state, cli, &hooks, out, project.as_deref(), *dry_run)
         }
+        Cmd::Merge { resume, abort, .. } if *resume || *abort => {
+            cmd_integration_recovery(&state, cli, out, "merge", *resume)
+        }
         Cmd::Merge {
             source,
             squash,
@@ -1419,23 +1437,30 @@ fn run(cli: &Cli, out: &mut output::Stdio) -> Result<()> {
             unstaged,
             remove,
             delete_branch,
+            ..
         } => cmd_merge(
             &state,
             cli,
             &hooks,
             settings,
             out,
-            source,
+            source
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("merge source required"))?,
             squash.as_deref(),
             *all,
             *unstaged,
             *remove,
             *delete_branch,
         ),
+        Cmd::Rebase { resume, abort, .. } if *resume || *abort => {
+            cmd_integration_recovery(&state, cli, out, "rebase", *resume)
+        }
         Cmd::Rebase {
             base,
             interactive,
             all,
+            ..
         } => cmd_rebase(
             &state,
             cli,
@@ -1445,12 +1470,6 @@ fn run(cli: &Cli, out: &mut output::Stdio) -> Result<()> {
             base.as_deref(),
             *interactive,
             *all,
-        ),
-        Cmd::Integration { action } => cmd_integration_recovery(
-            &state,
-            cli,
-            out,
-            matches!(action, IntegrationAction::Continue),
         ),
         Cmd::Snapshot { action } => {
             cmd_snapshot(&state, cli, &hooks, settings, out, action.as_ref())
@@ -3935,13 +3954,14 @@ fn report_repair(
 
 /// Refuses to replace recovery state from an unfinished integration.
 fn require_no_integration(meta: &ProjectMeta, workspace: &Workspace) -> Result<()> {
-    if meta
+    if let Some(integration) = meta
         .workspaces
         .get(workspace.name())
-        .is_some_and(|entry| entry.integration.is_some())
+        .and_then(|entry| entry.integration.as_ref())
     {
+        let operation = recovery_operation(integration)?;
         bail!(
-            "unfinished integration for workspace {}; use integration continue or abort",
+            "unfinished {operation} for workspace {}; use {operation} --continue or --abort",
             workspace.name()
         );
     }
@@ -4392,10 +4412,32 @@ fn finish_integration_recovery(
     Ok(IntegrationRecovery { operation, outcome })
 }
 
+fn recovery_operation(integration: &IntegrationState) -> Result<&'static str> {
+    match integration.mode.as_str() {
+        "merge" => Ok("merge"),
+        mode if mode.starts_with("rebase:") => Ok("rebase"),
+        _ => bail!("invalid stored integration mode"),
+    }
+}
+
+fn require_recovery_operation(
+    integration: &IntegrationState,
+    expected_operation: &str,
+) -> Result<()> {
+    let actual_operation = recovery_operation(integration)?;
+    if actual_operation != expected_operation {
+        bail!(
+            "stopped operation is a {actual_operation}; use {actual_operation} --continue or --abort"
+        );
+    }
+    Ok(())
+}
+
 fn cmd_integration_recovery(
     state: &GlobalState,
     cli: &Cli,
     out: &mut output::Stdio,
+    expected_operation: &str,
     continue_integration: bool,
 ) -> Result<()> {
     let ctx = resolve_context(state, cli)?;
@@ -4408,7 +4450,13 @@ fn cmd_integration_recovery(
         .workspaces
         .get(ws.name())
         .and_then(|entry| entry.integration.clone())
-        .ok_or_else(|| anyhow::anyhow!("no stopped integration for workspace {}", ws.name()))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no stopped {expected_operation} for workspace {}",
+                ws.name()
+            )
+        })?;
+    require_recovery_operation(&integration, expected_operation)?;
     let recovery =
         finish_integration_recovery(project, ws, &wt, &lock, &integration, continue_integration)?;
     drop(lock);
@@ -4516,14 +4564,7 @@ fn cmd_rebase(
             Some(InProgressOperation::Rebase { .. })
         );
     if mid_rebase {
-        let suggestion = match base {
-            Some(target) if all => format!("subspace rebase {target} --all"),
-            Some(target) => format!("subspace rebase {target}"),
-            None => "subspace rebase".to_string(),
-        };
-        out.diagnostic(&format!(
-            "after resolving with `git rebase --continue`, re-run `{suggestion}` to re-anchor"
-        ));
+        out.diagnostic("after resolving conflicts, run `subspace rebase --continue` (or `subspace rebase --abort`)");
     }
     let outcome = match result {
         Ok(outcome) => outcome,
@@ -6912,12 +6953,14 @@ mod tests {
             json: true,
             preview: false,
             command: Cmd::Merge {
-                source: "child".to_string(),
+                source: Some("child".to_string()),
                 squash: None,
                 all: false,
                 unstaged: true,
                 remove: false,
                 delete_branch: false,
+                resume: false,
+                abort: false,
             },
         };
         let mut out = output::Stdio::stdio(true, Verbosity::Normal);
@@ -7011,12 +7054,14 @@ mod tests {
             json: true,
             preview: false,
             command: Cmd::Merge {
-                source: "child".to_string(),
+                source: Some("child".to_string()),
                 squash: None,
                 all: false,
                 unstaged: false,
                 remove: false,
                 delete_branch: false,
+                resume: false,
+                abort: false,
             },
         };
         let mut out = output::Stdio::stdio(true, Verbosity::Normal);
@@ -7106,12 +7151,14 @@ mod tests {
             json: true,
             preview: false,
             command: Cmd::Merge {
-                source: "root".to_string(),
+                source: Some("root".to_string()),
                 squash: Some("squashed".to_string()),
                 all: true,
                 unstaged: false,
                 remove: false,
                 delete_branch: false,
+                resume: false,
+                abort: false,
             },
         };
         let mut out = output::Stdio::stdio(true, Verbosity::Normal);
@@ -7204,12 +7251,14 @@ mod tests {
             json: true,
             preview: false,
             command: Cmd::Merge {
-                source: "root".to_string(),
+                source: Some("root".to_string()),
                 squash: None,
                 all: true,
                 unstaged: false,
                 remove: false,
                 delete_branch: false,
+                resume: false,
+                abort: false,
             },
         };
         let mut out = output::Stdio::stdio(true, Verbosity::Normal);
@@ -7323,12 +7372,14 @@ mod tests {
             &fixture,
             "root",
             Cmd::Merge {
-                source: "child".to_string(),
+                source: Some("child".to_string()),
                 squash: None,
                 all: true,
                 unstaged: true,
                 remove: false,
                 delete_branch: false,
+                resume: false,
+                abort: false,
             },
         );
         assert!(value["plan"]["effects"].is_object());
@@ -7356,6 +7407,8 @@ mod tests {
                 base: Some("root".to_string()),
                 interactive: false,
                 all: false,
+                resume: false,
+                abort: false,
             },
         );
         assert_eq!(value["plan"]["stopped"], false);
@@ -7376,12 +7429,14 @@ mod tests {
             &fixture,
             "root",
             Cmd::Merge {
-                source: "child".to_string(),
+                source: Some("child".to_string()),
                 squash: None,
                 all: true,
                 unstaged: true,
                 remove: false,
                 delete_branch: false,
+                resume: false,
+                abort: false,
             },
         );
         assert_eq!(
@@ -7403,12 +7458,14 @@ mod tests {
             &fixture,
             "root",
             Cmd::Merge {
-                source: "child".to_string(),
+                source: Some("child".to_string()),
                 squash: None,
                 all: true,
                 unstaged: false,
                 remove: false,
                 delete_branch: false,
+                resume: false,
+                abort: false,
             },
         );
         assert_eq!(
@@ -7430,12 +7487,14 @@ mod tests {
             &fixture,
             "root",
             Cmd::Merge {
-                source: "child".to_string(),
+                source: Some("child".to_string()),
                 squash: None,
                 all: true,
                 unstaged: false,
                 remove: false,
                 delete_branch: false,
+                resume: false,
+                abort: false,
             },
         );
         assert_eq!(
@@ -7461,6 +7520,8 @@ mod tests {
                 base: Some("root".to_string()),
                 interactive: false,
                 all: false,
+                resume: false,
+                abort: false,
             },
         );
         assert_eq!(
@@ -7469,6 +7530,28 @@ mod tests {
         );
         assert_eq!(value["plan"]["changed_paths"], json!(["same.txt"]));
         assert_eq!(value["plan"]["overlap_paths"], json!(["same.txt"]));
+    }
+
+    #[test]
+    fn recovery_rejects_the_wrong_operation() {
+        for (mode, expected, actual) in [
+            ("merge", "rebase", "merge"),
+            ("rebase:interactive=false,all=false", "merge", "rebase"),
+        ] {
+            let integration = IntegrationState {
+                original_base: None,
+                target: None,
+                mode: mode.to_string(),
+                squash_message: None,
+            };
+            assert!(require_recovery_operation(&integration, actual).is_ok());
+            let error = require_recovery_operation(&integration, expected).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("stopped operation is a {actual}"))
+            );
+        }
     }
 
     #[test]
@@ -7667,12 +7750,14 @@ mod tests {
             &fixture,
             "root",
             Cmd::Merge {
-                source: "child".to_string(),
+                source: Some("child".to_string()),
                 squash: None,
                 all: true,
                 unstaged: true,
                 remove: false,
                 delete_branch: false,
+                resume: false,
+                abort: false,
             },
         );
         assert_eq!(
@@ -7846,8 +7931,10 @@ mod tests {
         &["subspace", "repair"],
         &["subspace", "merge", "work"],
         &["subspace", "rebase"],
-        &["subspace", "integration", "continue"],
-        &["subspace", "integration", "abort"],
+        &["subspace", "merge", "--continue"],
+        &["subspace", "merge", "--abort"],
+        &["subspace", "rebase", "--continue"],
+        &["subspace", "rebase", "--abort"],
         &["subspace", "snapshot"],
         &["subspace", "snapshot", "create"],
         &["subspace", "snapshot", "list"],
@@ -7857,6 +7944,16 @@ mod tests {
     /// Every operation the tool omits, with the rejection code that JSON mode gives it.
     const OMITTED_OPERATIONS: &[(&[&str], &str)] =
         &[(&["subspace", "rebase", "-i"], "unsupported")];
+
+    fn recovery_form(resume: bool, abort: bool) -> &'static str {
+        if resume {
+            " --continue"
+        } else if abort {
+            " --abort"
+        } else {
+            ""
+        }
+    }
 
     /// The name of the operation that `cmd` selects: its subcommand path, and the flag that splits
     /// an interactive form from a plain one. The JSON matrix keys its rows on this name, so one row
@@ -7892,17 +7989,19 @@ mod tests {
             Cmd::Remove { .. } => "remove".to_string(),
             Cmd::Rename { .. } => "rename".to_string(),
             Cmd::Repair { .. } => "repair".to_string(),
-            Cmd::Merge { .. } => "merge".to_string(),
-            Cmd::Rebase { interactive, .. } => {
-                format!("rebase{}", if *interactive { " -i" } else { "" })
+            Cmd::Merge { resume, abort, .. } => format!("merge{}", recovery_form(*resume, *abort)),
+            Cmd::Rebase {
+                interactive,
+                resume,
+                abort,
+                ..
+            } => {
+                format!(
+                    "rebase{}{}",
+                    if *interactive { " -i" } else { "" },
+                    recovery_form(*resume, *abort)
+                )
             }
-            Cmd::Integration { action } => format!(
-                "integration {}",
-                match action {
-                    IntegrationAction::Continue => "continue",
-                    IntegrationAction::Abort => "abort",
-                }
-            ),
             Cmd::Project { action } => format!(
                 "project {}",
                 match action {
@@ -7933,6 +8032,10 @@ mod tests {
             .any(|a| a.get_id().as_str().ends_with("interactive"))
         {
             forms.push(format!("{path} -i"));
+        }
+        if path == "merge" || path == "rebase" {
+            forms.push(format!("{path} --continue"));
+            forms.push(format!("{path} --abort"));
         }
         forms
     }
@@ -8004,6 +8107,27 @@ mod tests {
     #[test]
     fn cli_command_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn recovery_flags_select_an_operation_without_its_normal_arguments() {
+        for operation in ["merge", "rebase"] {
+            for flag in ["--continue", "--abort"] {
+                assert!(Cli::try_parse_from(["subspace", operation, flag]).is_ok());
+            }
+        }
+        for argv in [
+            vec!["subspace", "merge"],
+            vec!["subspace", "merge", "work", "--continue"],
+            vec!["subspace", "merge", "--continue", "--abort"],
+            vec!["subspace", "merge", "--abort", "--remove"],
+            vec!["subspace", "rebase", "root", "--continue"],
+            vec!["subspace", "rebase", "--abort", "--all"],
+            vec!["subspace", "rebase", "--continue", "--abort"],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
+        assert!(Cli::try_parse_from(["subspace", "integration", "continue"]).is_err());
     }
 
     #[test]

@@ -140,7 +140,6 @@ function _subspace() {
                 'root:show root workspace of current tree'
                 'tree:show workspace tree'
                 'rebase:rebase workspace branch onto its base'
-                'integration:continue or abort a stopped merge or rebase'
                 'remove:remove a workspace worktree'
                 'rename:rename a workspace'
                 'repair:prune dead metadata and fix or rebuild broken worktree links'
@@ -206,8 +205,6 @@ function _subspace() {
                     _arguments '1:target:(workspace project)' ;;
                 compare)
                     _arguments '1:workspace:_subspace_names' ;;
-                integration)
-                    _arguments '1:action:(continue abort)' ;;
                 default)
                     _arguments \
                         '--set[set the default workspace]:workspace:_subspace_plain_names' ;;
@@ -269,7 +266,9 @@ function _subspace() {
                         '--all[replay all source commits since the common ancestor]' \
                         '--unstaged[also bring unstaged changes and untracked files]' \
                         '--remove[remove the source workspace after a successful merge]' \
-                        '--delete-branch[delete the source branch with the source workspace]' ;;
+                        '--delete-branch[delete the source branch with the source workspace]' \
+                        '--continue[continue a stopped merge]' \
+                        '--abort[abort a stopped merge]' ;;
                 list)
                     _arguments \
                         '--parents[print "name<TAB>parent" per workspace]' ;;
@@ -289,7 +288,9 @@ function _subspace() {
                     _arguments \
                         '1::base branch:_subspace_names' \
                         '-i[rebase interactively (git rebase -i)]' \
-                        '--all[replay every commit ahead of the base, not just those ahead of the branch point]' ;;
+                        '--all[replay every commit ahead of the base, not just those ahead of the branch point]' \
+                        '--continue[continue a stopped rebase]' \
+                        '--abort[abort a stopped rebase]' ;;
                 remove)
                     _arguments \
                         '1:target:_subspace_absolute_names' \

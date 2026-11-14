@@ -144,10 +144,14 @@ test("remove passes the force flag only when requested", () => {
 	assert.equal(actionArgs({ action: "remove", target: "work", force: true }).includes("--force"), true);
 });
 
-test("maps generic recovery actions to the integration command", () => {
+test("maps recovery actions to their operations", () => {
 	const global = ["--json", "--no-interactive", "--color", "never"];
-	assert.deepEqual(actionArgs({ action: "integrationContinue" }), [...global, "integration", "continue"]);
-	assert.deepEqual(actionArgs({ action: "integrationAbort" }), [...global, "integration", "abort"]);
+	for (const operation of ["merge", "rebase"] as const) {
+		for (const step of ["Continue", "Abort"] as const) {
+			const action = `${operation}${step}` as "mergeContinue" | "mergeAbort" | "rebaseContinue" | "rebaseAbort";
+			assert.deepEqual(actionArgs({ action }), [...global, operation, `--${step.toLowerCase()}`]);
+		}
+	}
 });
 
 test("runs explicit previews without a token", async () => {

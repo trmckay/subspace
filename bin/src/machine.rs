@@ -254,7 +254,7 @@ pub struct IntegrationPreview {
     pub plan: IntegrationPlan,
 }
 
-/// The machine result of `integration continue` and `integration abort`.
+/// The machine result of merge or rebase recovery.
 #[derive(Serialize)]
 pub struct IntegrationJson<'a> {
     pub project: &'a str,
