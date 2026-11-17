@@ -984,7 +984,14 @@ fn merge_commits(
 }
 
 fn integration_preview(state: &GlobalState, cli: &Cli) -> Result<machine::IntegrationPreview> {
-    let ctx = resolve_context(state, cli)?;
+    integration_preview_in_context(state, cli, resolve_context(state, cli)?)
+}
+
+fn integration_preview_in_context(
+    state: &GlobalState,
+    cli: &Cli,
+    ctx: Context,
+) -> Result<machine::IntegrationPreview> {
     let ws = ctx.scope.require_workspace()?;
     let project = ctx.scope.project();
     let meta = project.metadata().read()?;
@@ -2483,7 +2490,14 @@ fn cmd_inspect<R: Write, D: Write, M: Write>(
     out: &mut output::Channel<R, D, M>,
     target: &InspectTarget,
 ) -> Result<()> {
-    let ctx = resolve_context(state, cli)?;
+    inspect_in_context(resolve_context(state, cli)?, out, target)
+}
+
+fn inspect_in_context<R: Write, D: Write, M: Write>(
+    ctx: Context,
+    out: &mut output::Channel<R, D, M>,
+    target: &InspectTarget,
+) -> Result<()> {
     match target {
         InspectTarget::Workspace => {
             let ws = ctx.scope.require_workspace()?;
@@ -2579,7 +2593,15 @@ fn cmd_compare<R: Write, D: Write, M: Write>(
     out: &mut output::Channel<R, D, M>,
     target: &str,
 ) -> Result<()> {
-    let ctx = resolve_context(state, cli)?;
+    compare_in_context(state, resolve_context(state, cli)?, out, target)
+}
+
+fn compare_in_context<R: Write, D: Write, M: Write>(
+    state: &GlobalState,
+    ctx: Context,
+    out: &mut output::Channel<R, D, M>,
+    target: &str,
+) -> Result<()> {
     let current = ctx.scope.require_workspace()?;
     let other = ctx.resolve_target(state, target, TargetScope::Any)?;
     let current_wt = current.worktree()?;
@@ -6853,7 +6875,11 @@ mod tests {
             preview: true,
             command,
         };
-        to_value(&integration_preview(&fixture.state, &cli).unwrap())
+        let ctx = Context::for_workspace(Workspace::new(
+            fixture.project.clone(),
+            workspace.to_string(),
+        ));
+        to_value(&integration_preview_in_context(&fixture.state, &cli, ctx).unwrap())
     }
 
     fn inspection_document(fixture: &InspectionFixture, command: Cmd) -> serde_json::Value {
@@ -6871,10 +6897,12 @@ mod tests {
             command,
         };
         let mut out = test_channel();
+        let ctx =
+            Context::for_workspace(Workspace::new(fixture.project.clone(), "child".to_string()));
         match &cli.command {
-            Cmd::Inspect { target } => cmd_inspect(&fixture.state, &cli, &mut out, target).unwrap(),
+            Cmd::Inspect { target } => inspect_in_context(ctx, &mut out, target).unwrap(),
             Cmd::Compare { workspace } => {
-                cmd_compare(&fixture.state, &cli, &mut out, workspace).unwrap()
+                compare_in_context(&fixture.state, ctx, &mut out, workspace).unwrap()
             }
             _ => unreachable!(),
         }
