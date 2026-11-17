@@ -9,6 +9,8 @@ lint: node_modules
 	cargo fmt --all -- --check
 	cargo clippy --locked -- -D warnings
 	npm run lint
+	bash -n scripts/pre-commit scripts/install-pre-commit
+	shellcheck scripts/pre-commit scripts/install-pre-commit
 
 test: node_modules
 	cargo test --locked

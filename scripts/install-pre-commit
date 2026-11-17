@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source_hook="scripts/pre-commit"
+hooks=".hooks"
+dest="$hooks/pre-commit"
+
+if [[ -L "$hooks" || -L "$dest" ]]; then
+    echo "install-pre-commit: hook path must not be a symlink: $dest" >&2
+    exit 1
+fi
+if [[ ! -f "$source_hook" ]]; then
+    echo "install-pre-commit: missing hook: $source_hook" >&2
+    exit 1
+fi
+if [[ -f "$dest" ]] && cmp -s -- "$source_hook" "$dest" && [[ -x "$dest" ]]; then
+    exit 0
+fi
+
+mkdir -p -- "$hooks"
+tmp=$(mktemp "$hooks/.pre-commit.XXXXXX")
+trap 'rm -f -- "$tmp"' EXIT
+cp -- "$source_hook" "$tmp"
+chmod 755 "$tmp"
+mv -f -- "$tmp" "$dest"

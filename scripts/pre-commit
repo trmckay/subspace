@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+
+# Runs `make check` on the staged tree. The unstaged changes go into a
+# verified snapshot before the working tree resets to the index. A failed
+# transition retains the snapshot for recovery. The index never changes.
+# Nothing here uses the stash. The checks run without the Git variables
+# exported to hooks, so tests that create repositories use their own paths.
+
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+if git diff --cached --quiet; then
+    exit 0
+fi
+
+aside=$(mktemp -d)
+patch="$aside/unstaged.patch"
+current_patch="$aside/current.patch"
+entries="$aside/snapshot.entries"
+
+# Reports recovery data that the hook must retain.
+retain_snapshot() {
+    echo "pre-commit: $1; retained snapshot at $aside" >&2
+    echo "pre-commit: recover tracked edits from $patch and untracked files from $aside/tree" >&2
+}
+
+# Puts the unstaged changes and the untracked files back when live files
+# still match the staged tree.
+# shellcheck disable=SC2329
+restore() {
+    local live_entries="$aside/live.entries"
+    local status=0
+    if ! git diff --quiet --; then
+        retain_snapshot "live files changed while checks ran"
+        return 1
+    fi
+    if ! git ls-files --others --exclude-standard -z > "$live_entries" || [ -s "$live_entries" ]; then
+        retain_snapshot "live untracked files changed while checks ran"
+        return 1
+    fi
+    if [ -s "$patch" ] && ! git apply --whitespace=nowarn "$patch"; then
+        retain_snapshot "cannot reapply unstaged changes"
+        return 1
+    fi
+    while IFS= read -r -d '' f; do
+        if [ ! -e "$aside/tree/$f" ] && [ ! -L "$aside/tree/$f" ]; then
+            status=1
+            continue
+        fi
+        if [ -e "$f" ] || [ -L "$f" ] || ! mkdir -p "$(dirname "$f")" || ! mv -i "$aside/tree/$f" "$f" < /dev/null || [ -e "$aside/tree/$f" ] || [ -L "$aside/tree/$f" ]; then
+            status=1
+        fi
+    done < "$entries"
+    if [ "$status" = 1 ]; then
+        retain_snapshot "cannot restore all untracked files"
+        return 1
+    fi
+    if ! rm -rf "$aside"; then
+        retain_snapshot "cannot remove restored snapshot"
+        return 1
+    fi
+}
+
+# Restores the snapshot and preserves the hook failure status.
+# shellcheck disable=SC2329
+on_exit() {
+    local status=$?
+    if [ "$restore_armed" = 1 ] && ! restore; then
+        status=1
+    fi
+    exit "$status"
+}
+
+restore_armed=0
+
+if ! git diff --binary --no-color --no-ext-diff > "$patch"; then
+    retain_snapshot "cannot save unstaged changes"
+    exit 1
+fi
+if ! git ls-files --others --exclude-standard -z > "$entries"; then
+    retain_snapshot "cannot list untracked files"
+    exit 1
+fi
+if ! mkdir -p "$aside/tree"; then
+    retain_snapshot "cannot prepare untracked-file snapshot"
+    exit 1
+fi
+snapshot_failed=0
+while IFS= read -r -d '' f; do
+    if ! mkdir -p "$aside/tree/$(dirname "$f")" || ! mv "$f" "$aside/tree/$f"; then
+        snapshot_failed=1
+    fi
+done < "$entries"
+if [ "$snapshot_failed" = 1 ]; then
+    retain_snapshot "cannot save all untracked files"
+    exit 1
+fi
+if ! git diff --binary --no-color --no-ext-diff > "$current_patch"; then
+    retain_snapshot "cannot verify unstaged changes"
+    exit 1
+fi
+if ! git diff --no-index --quiet -- "$patch" "$current_patch"; then
+    retain_snapshot "tracked files changed while the snapshot was prepared"
+    exit 1
+fi
+if ! git checkout --quiet -- .; then
+    retain_snapshot "cannot reset tracked files"
+    exit 1
+fi
+restore_armed=1
+trap on_exit EXIT
+
+env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_PREFIX make check
