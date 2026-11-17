@@ -3180,6 +3180,40 @@ enum AddMode<'a> {
     Clone,
 }
 
+fn select_add_branch(
+    workspace: &Workspace,
+    anchor: &Worktree,
+    start: &mut StartPoint,
+    branch: Option<&str>,
+    detach: bool,
+    settings: ClientSettings,
+    ask: impl FnOnce(ClientSettings, &str) -> Result<bool>,
+) -> Result<Option<String>> {
+    if detach || (matches!(start, StartPoint::Branch(_)) && branch.is_none()) {
+        return Ok(None);
+    }
+    let name = workspace.derived_branch(branch)?;
+    if !anchor.has_branch(&name) {
+        return Ok(None);
+    }
+    let existing = anchor.resolve_start(&name)?;
+    if start.sha() != existing.sha() {
+        if !settings.interactive {
+            bail!(
+                "branch '{name}' already exists at a different commit\nrun with --interactive to choose whether to use it"
+            );
+        }
+        if !ask(
+            settings,
+            &format!("Use existing branch '{name}' at a different commit? [y/N] "),
+        )? {
+            bail!("did not use existing branch '{name}'");
+        }
+    }
+    *start = existing;
+    Ok(Some(name))
+}
+
 fn cmd_add(
     state: &GlobalState,
     cli: &Cli,
@@ -3252,7 +3286,7 @@ fn cmd_add(
         bail!("--unstaged requires a parent workspace to copy working-tree state from");
     }
 
-    let start = if let Some(former_parent) = parent_ws
+    let mut start = if let Some(former_parent) = parent_ws
         .as_ref()
         .filter(|_| reparent_child.is_some() && git_ref.is_none())
     {
@@ -3263,8 +3297,14 @@ fn cmd_add(
         resolve_start(&ctx, state, project, git_ref.as_deref())?
     };
 
+    let anchor = project.anchor_worktree()?;
+    let settings = cli.settings(io::stdout().is_terminal(), io::stderr().is_terminal());
+    let existing_branch = select_add_branch(
+        &new_ws, &anchor, &mut start, branch, detach, settings, confirm,
+    )?;
+
     if let Some(edge) = &source_edge
-        && !project.anchor_worktree()?.is_ancestor(&edge.base, &start)?
+        && !anchor.is_ancestor(&edge.base, &start)?
     {
         bail!("clone start point is before the source fork point");
     }
@@ -3307,6 +3347,12 @@ fn cmd_add(
         }
     }
 
+    if let Some(name) = &existing_branch
+        && (!anchor.has_branch(name) || anchor.resolve_start(name)?.sha() != start.sha())
+    {
+        bail!("branch '{name}' changed since the add was planned\nrun it again");
+    }
+
     // Resolve the parent edge before anything lands on disk, so a failure here cannot leave half a
     // workspace behind. For `--parent-of`, `plan_insert_parent` plans the edge after creation
     // instead, because `start` is the tip of the former parent and cannot fail there.
@@ -3331,9 +3377,10 @@ fn cmd_add(
         bail!("workspace already exists: {}", name);
     }
 
-    let anchor = project.anchor_worktree()?;
     if detach {
         new_ws.checkout_detached(&lock, &anchor, &start)?;
+    } else if let Some(existing) = &existing_branch {
+        new_ws.checkout_branch(&lock, &anchor, existing)?;
     } else {
         match &start {
             StartPoint::Branch(existing) if branch.is_none() => {
@@ -6609,6 +6656,94 @@ mod tests {
             state,
             root,
             child,
+        }
+    }
+
+    #[test]
+    fn add_reuses_a_matching_branch_and_refuses_a_different_tip_without_a_prompt() {
+        let fixture = inspection_fixture();
+        git(&fixture.root, &["branch", "topic/matched", "HEAD"]);
+        std::fs::write(fixture.child.join("change.txt"), "change\n").unwrap();
+        git(&fixture.child, &["add", "change.txt"]);
+        git(&fixture.child, &["commit", "-q", "-m", "change"]);
+        git(&fixture.root, &["branch", "topic/different", "child"]);
+
+        let anchor = fixture.project.anchor_worktree().unwrap();
+        let settings = ClientSettings {
+            color: false,
+            interactive: false,
+            verbosity: Verbosity::Normal,
+        };
+        for (name, matches_start) in [("different", false), ("matched", true)] {
+            let workspace = Workspace::new(fixture.project.clone(), name.to_string());
+            let mut start = StartPoint::Commit(
+                Workspace::get(&fixture.project, "root")
+                    .unwrap()
+                    .worktree()
+                    .unwrap()
+                    .resolve_ref("HEAD")
+                    .unwrap(),
+            );
+            let result = select_add_branch(
+                &workspace,
+                &anchor,
+                &mut start,
+                None,
+                false,
+                settings,
+                |_, _| panic!("noninteractive add must not prompt"),
+            );
+            if matches_start {
+                let branch = result.unwrap().unwrap();
+                assert_eq!(branch, "topic/matched");
+                assert_eq!(start.sha(), git_head(&fixture.root));
+                let lock = fixture.project.lock("test").unwrap();
+                workspace.checkout_branch(&lock, &anchor, &branch).unwrap();
+                assert_eq!(
+                    workspace.worktree().unwrap().get_branch().as_deref(),
+                    Some(branch.as_str())
+                );
+                assert_eq!(git_head(&workspace.path()), start.sha());
+            } else {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("different commit"), "{error:#}");
+                assert_eq!(start.sha(), git_head(&fixture.root));
+            }
+        }
+
+        let workspace = Workspace::new(fixture.project.clone(), "different".to_string());
+        for accepted in [false, true] {
+            let mut start = StartPoint::Commit(
+                Workspace::get(&fixture.project, "root")
+                    .unwrap()
+                    .worktree()
+                    .unwrap()
+                    .resolve_ref("HEAD")
+                    .unwrap(),
+            );
+            let settings = ClientSettings {
+                interactive: true,
+                ..settings
+            };
+            let result = select_add_branch(
+                &workspace,
+                &anchor,
+                &mut start,
+                None,
+                false,
+                settings,
+                |_, prompt| {
+                    assert!(prompt.contains("topic/different"));
+                    Ok(accepted)
+                },
+            );
+            if accepted {
+                assert_eq!(result.unwrap().as_deref(), Some("topic/different"));
+                assert_eq!(start.sha(), git_head(&fixture.child));
+            } else {
+                assert!(result.unwrap_err().to_string().contains("did not use"));
+                assert_eq!(start.sha(), git_head(&fixture.root));
+            }
         }
     }
 

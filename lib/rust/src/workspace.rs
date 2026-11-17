@@ -214,10 +214,10 @@ impl Workspace {
         Gh::pr_number(Some(dir.as_path()), &branch)
     }
 
-    /// The name of a new branch. It is `branch` when the caller gives one. Otherwise it is
+    /// The branch name for this workspace. It is `branch` when the caller gives one. Otherwise it is
     /// `<branch_prefix>/<name>` when the project has a `branch_prefix` setting, and the workspace
     /// name when it has none.
-    fn derived_branch(&self, branch: Option<&str>) -> Result<String> {
+    pub fn derived_branch(&self, branch: Option<&str>) -> Result<String> {
         Ok(match branch {
             Some(b) => b.to_string(),
             None => match self.project().branch_prefix()?.as_deref() {
